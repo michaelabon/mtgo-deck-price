@@ -2,16 +2,20 @@
 
 require 'colored'
 require 'mechanize'
+require 'redis'
 require 'pp'
+
+$r = Redis.new
+$r_namespace = "mtgodeckprice::"
 
 class Card
   include Comparable
   attr_accessor :product, :price, :qty
 
   def initialize(product, price, qty)
-    @product = product.text.strip.gsub("\u00A0", "")
-    @price = Float(price.text.strip[1..-1]) # remove leading $
-    @qty = Integer(qty.text.strip)
+    @product = product
+    @price = Float(price)
+    @qty = Integer(qty)
   end
 
   def <=>(other)
@@ -98,6 +102,18 @@ text_key = 'search_field'
 @results = []
 
 cards.each do |card|
+  key_name = "#{$r_namespace}price::#{card}"
+  print "Attempting to read #{key_name} from cache...".yellow
+  cached = $r.get(key_name)
+  if cached
+    card = Card.new(card, cached, "-1")
+    @results << card
+    puts "done!".green
+    puts card
+    next
+  end
+  puts "missed!".yellow
+
   a = Mechanize.new
   a.get(url) do |page|
     card_result = page.form_with(:action => /productsearch\.cgi/) do |search|
@@ -116,15 +132,15 @@ cards.each do |card|
         nil
       elsif row.at("td[6]") == nil # This row is for a foil card
         Card.new(
-          row.at("td[1]"),
-          row.at("td[2]"),
-          row.at("td[3]"),
+          row.at("td[1]").text.strip.gsub("\u00A0", ""),
+          row.at("td[2]").text.strip[1..-1], # remove leading $
+          row.at("td[3]").text.strip,
         )
       else
         Card.new(
-          row.at("td[3]"),
-          row.at("td[4]"),
-          row.at("td[5]"),
+          row.at("td[3]").text.strip.gsub("\u00A0", ""),
+          row.at("td[4]").text.strip[1..-1], # remove leading $
+          row.at("td[5]").text.strip,
         )
       end
     end
@@ -133,9 +149,15 @@ cards.each do |card|
 
     card_prices.delete_if {|x| x == nil || x.qty == 0}
 
-    puts card_prices.min
+    best = card_prices.min
 
-    @results << card_prices.min
+    puts best
+
+    $r.set(key_name, best.price)
+    puts "Caching #{key_name} as #{best.price}".yellow
+    $r.expire(key_name, 60 * 60 * 24 * 7)
+
+    @results << best
   end
 end
 
